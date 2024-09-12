@@ -1,17 +1,16 @@
-#ifndef UNICODE
-#define UNICODE
-#endif
-
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <mmeapi.h>
 #include <mmreg.h>
 
-#include <thread>
 #define _USE_MATH_DEFINES
 #include <math.h>
 
-#include <spdlog/spdlog.h>
+#define PLOG_ENABLE_WCHAR_INPUT 1
+#include <plog/Log.h>
+#include <plog/Init.h>
+#include <plog/Formatters/TxtFormatter.h>
+#include <plog/Appenders/ColorConsoleAppender.h>
 
 #define SAFE_RELEASE(x)   \
     if ((x) != nullptr) { \
@@ -52,24 +51,20 @@ static void exit_on_error(HRESULT result)
         return wcstoul(locale, nullptr, 16);
     }();
 
-    static HANDLE out_handle = GetStdHandle(STD_OUTPUT_HANDLE);
-
     if (FAILED(result)) {
-        wchar_t* buf = nullptr;
+        wchar_t buf[256] {};
 
-        unsigned long msg_size = FormatMessageW(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            0,
+        FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
             result,
             locale_id,
             (wchar_t*)&buf,
-            0,
+            sizeof(buf) / sizeof(buf[0]),
             nullptr
         );
 
-        WriteConsoleW(out_handle, buf, msg_size, nullptr, nullptr);
-
-        LocalFree(buf);
+        PLOG_ERROR << buf;
         exit(EXIT_FAILURE);
     }
 }
@@ -116,16 +111,18 @@ static void generate_sin_samples(
 
 int main()
 {
-    spdlog::info("Test");
+    static plog::ColorConsoleAppender<plog::TxtFormatter> console_appender;
+    plog::init(plog::verbose, &console_appender);
+
     exit_on_error(CoInitializeEx(nullptr, COINITBASE_MULTITHREADED));
 
     IMMDeviceEnumerator* enumerator = nullptr;
-    exit_on_error(
-        CoCreateInstance(__uuidof(MMDeviceEnumerator),
-                         0,
-                         CLSCTX_ALL,
-                         __uuidof(IMMDeviceEnumerator),
-                         (void* *)&enumerator)
+    exit_on_error(CoCreateInstance(
+        __uuidof(MMDeviceEnumerator),
+        0,
+        CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator),
+        (void* *)&enumerator)
     );
 
     IMMDevice* device = nullptr;
@@ -141,44 +138,20 @@ int main()
 
     if (format->wFormatTag == WAVE_FORMAT_PCM || (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format)->SubFormat == KSDATAFORMAT_SUBTYPE_PCM)) {
         if (format->wBitsPerSample == 16) {
-            WriteConsoleA(
-                GetStdHandle(STD_OUTPUT_HANDLE),
-                "Sample type: 16 bit PCM\n",
-                25,
-                nullptr,
-                nullptr
-            );
+            PLOG_INFO << "Sample type: 16bit PCM";
             sample_type = RenderSampleType::PCM16bit;
         }
         else {
-            WriteConsoleA(
-                GetStdHandle(STD_OUTPUT_HANDLE),
-                "Unknown PCM integer type\n",
-                26,
-                nullptr,
-                nullptr
-            );
+            PLOG_ERROR << "Unknown PCM integer type";
             exit(EXIT_FAILURE);
         }
     }
     else if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT || (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
-        WriteConsoleA(
-            GetStdHandle(STD_OUTPUT_HANDLE),
-            "Sample type: float\n",
-            20,
-            nullptr,
-            nullptr
-        );
+        PLOG_INFO << "Sample type: float";
         sample_type = RenderSampleType::Float;
     }
     else {
-        WriteConsoleA(
-            GetStdHandle(STD_OUTPUT_HANDLE),
-            "Unknown device format\n",
-            23,
-            nullptr,
-            nullptr
-        );
+        PLOG_ERROR << "Unknown device format";
         exit(EXIT_FAILURE);
     }
 
@@ -206,26 +179,14 @@ int main()
     for (size_t i = 0; i < buffer_count; ++i) {
         RenderBuffer* buffer = new RenderBuffer();
         if (buffer == nullptr) {
-            WriteConsoleA(
-                GetStdHandle(STD_OUTPUT_HANDLE),
-                "Unable to allocate RenderBuffer\n",
-                34,
-                nullptr,
-                nullptr
-            );
+            PLOG_ERROR << "Unable to allocate RenderBuffer";
             exit(EXIT_FAILURE);
         }
 
         buffer->length = buffer_size_bytes;
         buffer->buffer = new unsigned char[buffer_size_bytes];
         if (buffer->buffer == nullptr) {
-            WriteConsoleA(
-                GetStdHandle(STD_OUTPUT_HANDLE),
-                "Unable to allocate RenderBuffer buffer\n",
-                34,
-                nullptr,
-                nullptr
-            );
+            PLOG_ERROR << "Unable to allocate RenderBuffer buffer";
             exit(EXIT_FAILURE);
         }
 
@@ -271,8 +232,7 @@ int main()
     exit_on_error(client->Start());
 
     while (still_playing) {
-        std::chrono::milliseconds sleep_time(latency / 2);
-        std::this_thread::sleep_for(sleep_time);
+        Sleep(latency / 2);
 
         if (render_queue == nullptr) {
             still_playing = false;

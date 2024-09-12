@@ -8,3 +8,6 @@ x64/
 # Thirdparty debug files
 *d.lib
 *.pdb
+
+# Compiler score files
+compileData.*
