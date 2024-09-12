@@ -18,6 +18,24 @@
         (x) = nullptr;    \
     }
 
+#define EXIT_ON_ERROR(result)                                           \
+    if (FAILED((result))) {                                             \
+        wchar_t buf[256]{};                                             \
+                                                                        \
+        FormatMessageW(                                                 \
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, \
+            nullptr,                                                    \
+            (result),                                                   \
+            locale_id,                                                  \
+            (wchar_t*)&buf,                                             \
+            sizeof(buf) / sizeof(buf[0]),                               \
+            nullptr                                                     \
+        );                                                              \
+                                                                        \
+        PLOG_ERROR << buf;                                              \
+        exit(EXIT_FAILURE);                                             \
+    }                                                                   \
+
 enum class RenderSampleType {
     Float,
     PCM16bit
@@ -33,53 +51,21 @@ struct RenderBuffer {
     }
 };
 
+static unsigned long locale_id = []() {
+    wchar_t locale[32];
+    GetLocaleInfoEx(
+        LOCALE_NAME_USER_DEFAULT,
+        LOCALE_ILANGUAGE,
+        locale,
+        sizeof(locale) / sizeof(locale[0])
+    );
+
+    return wcstoul(locale, nullptr, 16);
+}();
+
 constexpr int frequency = 440;
 constexpr int latency = 50;
 constexpr int duration = 5;
-
-static void exit_on_error(HRESULT result)
-{
-    static unsigned long locale_id = []() {
-        wchar_t locale[32];
-        GetLocaleInfoEx(
-            LOCALE_NAME_USER_DEFAULT,
-            LOCALE_ILANGUAGE,
-            locale,
-            sizeof(locale) / sizeof(locale[0])
-        );
-
-        return wcstoul(locale, nullptr, 16);
-    }();
-
-    if (FAILED(result)) {
-        wchar_t buf[256] {};
-
-        FormatMessageW(
-            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr,
-            result,
-            locale_id,
-            (wchar_t*)&buf,
-            sizeof(buf) / sizeof(buf[0]),
-            nullptr
-        );
-
-        PLOG_ERROR << buf;
-        exit(EXIT_FAILURE);
-    }
-}
-
-template<typename T> inline T convert(double Value);
-
-template<>
-inline float convert<float>(double value) {
-    return (float)value;
-}
-
-template<>
-inline short convert<short>(double value) {
-    return (short(value * _I16_MAX));
-}
 
 template<typename T>
 static void generate_sin_samples(
@@ -91,14 +77,19 @@ static void generate_sin_samples(
     double* initial_angle
 ) {
     double increment = (frequency * (M_PI * 2)) / (double)samples_per_second;
-    T* data = reinterpret_cast<T *>(buffer);
+    T* data = reinterpret_cast<T*>(buffer);
     double theta = initial_angle != nullptr ? *initial_angle : 0;
 
     for (size_t i = 0; i < length / sizeof(T); i += channel_count) {
         double value = sin(theta);
         
         for (size_t j = 0; j < channel_count; ++j) {
-            data[i + j] = convert<T>(value);
+            if constexpr (std::is_same_v<T, float>) {
+                data[i + j] = (float)value;
+            }
+            else if constexpr (std::is_same_v<T, short>) {
+                data[i + j] = (short(value * _I16_MAX));
+            }
         }
 
         theta += increment;
@@ -114,10 +105,10 @@ int main()
     static plog::ColorConsoleAppender<plog::TxtFormatter> console_appender;
     plog::init(plog::verbose, &console_appender);
 
-    exit_on_error(CoInitializeEx(nullptr, COINITBASE_MULTITHREADED));
+    EXIT_ON_ERROR(CoInitializeEx(nullptr, COINITBASE_MULTITHREADED));
 
     IMMDeviceEnumerator* enumerator = nullptr;
-    exit_on_error(CoCreateInstance(
+    EXIT_ON_ERROR(CoCreateInstance(
         __uuidof(MMDeviceEnumerator),
         0,
         CLSCTX_ALL,
@@ -126,13 +117,13 @@ int main()
     );
 
     IMMDevice* device = nullptr;
-    exit_on_error(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
+    EXIT_ON_ERROR(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
 
     IAudioClient* client = nullptr;
-    exit_on_error(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void* *)&client));
+    EXIT_ON_ERROR(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void* *)&client));
 
     WAVEFORMATEX* format = nullptr;
-    exit_on_error(client->GetMixFormat(&format));
+    EXIT_ON_ERROR(client->GetMixFormat(&format));
 
     RenderSampleType sample_type;
 
@@ -155,7 +146,7 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    exit_on_error(client->Initialize(
+    EXIT_ON_ERROR(client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_NOPERSIST,
         latency * 10000,
@@ -165,7 +156,7 @@ int main()
     ));
 
     unsigned int buffer_size = 0;
-    exit_on_error(client->GetBufferSize(&buffer_size));
+    EXIT_ON_ERROR(client->GetBufferSize(&buffer_size));
 
     unsigned int buffer_size_bytes = (buffer_size / 4) * format->nBlockAlign;
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
@@ -218,18 +209,18 @@ int main()
     }
 
     IAudioRenderClient* render = nullptr;
-    exit_on_error(client->GetService(__uuidof(IAudioRenderClient), (void* *)&render));
+    EXIT_ON_ERROR(client->GetService(__uuidof(IAudioRenderClient), (void* *)&render));
 
     // One buffer's worth of silence to avoid glitches at the start
     {
         unsigned char* data;
-        exit_on_error(render->GetBuffer(buffer_size, &data));
-        exit_on_error(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
+        EXIT_ON_ERROR(render->GetBuffer(buffer_size, &data));
+        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
     }
 
     bool still_playing = true;
 
-    exit_on_error(client->Start());
+    EXIT_ON_ERROR(client->Start());
 
     while (still_playing) {
         Sleep(latency / 2);
@@ -242,7 +233,7 @@ int main()
             unsigned int padding;
             unsigned int frames_available;
 
-            exit_on_error(client->GetCurrentPadding(&padding));
+            EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
 
             frames_available = buffer_size - padding;
 
@@ -252,20 +243,20 @@ int main()
 
                 unsigned int frames_to_write = buffer->length / format->nBlockAlign;
 
-                exit_on_error(render->GetBuffer(frames_to_write, &data));
+                EXIT_ON_ERROR(render->GetBuffer(frames_to_write, &data));
 
                 CopyMemory(data, buffer->buffer, frames_to_write * format->nBlockAlign);
-                exit_on_error(render->ReleaseBuffer(frames_to_write, 0));
+                EXIT_ON_ERROR(render->ReleaseBuffer(frames_to_write, 0));
 
                 delete buffer;
 
-                exit_on_error(client->GetCurrentPadding(&padding));
+                EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
                 frames_available = buffer_size - padding;
             }
         }
     }
 
-    exit_on_error(client->Stop());
+    EXIT_ON_ERROR(client->Stop());
     CoUninitialize();
 
     CoTaskMemFree(format);
