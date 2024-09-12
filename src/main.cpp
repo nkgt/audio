@@ -6,7 +6,6 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
-#define PLOG_ENABLE_WCHAR_INPUT 1
 #include <plog/Log.h>
 #include <plog/Init.h>
 #include <plog/Formatters/TxtFormatter.h>
@@ -39,16 +38,6 @@
 enum class RenderSampleType {
     Float,
     PCM16bit
-};
-
-struct RenderBuffer {
-    RenderBuffer* next = nullptr;
-    unsigned int length = 0;
-    unsigned char* buffer = nullptr;
-
-    ~RenderBuffer() {
-        if (buffer != nullptr) delete[] buffer;
-    }
 };
 
 static unsigned long locale_id = []() {
@@ -88,7 +77,7 @@ static void generate_sin_samples(
                 data[i + j] = (float)value;
             }
             else if constexpr (std::is_same_v<T, short>) {
-                data[i + j] = (short(value * _I16_MAX));
+                data[i + j] = (short)(value * _I16_MAX);
             }
         }
 
@@ -162,54 +151,41 @@ int main()
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
     size_t buffer_count = data_length / buffer_size_bytes;
 
-    RenderBuffer* render_queue = nullptr;
-    RenderBuffer** render_queue_tail = &render_queue;
+    unsigned char* render_buffer = new (std::nothrow) unsigned char[buffer_count * buffer_size_bytes];
+    if (render_buffer == nullptr) {
+        PLOG_ERROR << "Unable to allocate render buffer";
+        exit(EXIT_FAILURE);
+    }
 
     double theta = 0;
 
     for (size_t i = 0; i < buffer_count; ++i) {
-        RenderBuffer* buffer = new RenderBuffer();
-        if (buffer == nullptr) {
-            PLOG_ERROR << "Unable to allocate RenderBuffer";
-            exit(EXIT_FAILURE);
-        }
-
-        buffer->length = buffer_size_bytes;
-        buffer->buffer = new unsigned char[buffer_size_bytes];
-        if (buffer->buffer == nullptr) {
-            PLOG_ERROR << "Unable to allocate RenderBuffer buffer";
-            exit(EXIT_FAILURE);
-        }
-
         switch (sample_type) {
             case RenderSampleType::Float:
                 generate_sin_samples<float>(
-                    buffer->buffer,
-                    buffer->length,
+                    render_buffer + i * buffer_size_bytes,
+                    buffer_size_bytes,
                     frequency,
                     format->nChannels,
                     format->nSamplesPerSec,
                     &theta
-            );
+                );
                 break;
             case RenderSampleType::PCM16bit:
                 generate_sin_samples<short>(
-                    buffer->buffer,
-                    buffer->length,
+                    render_buffer + i * buffer_size_bytes,
+                    buffer_size_bytes,
                     frequency,
                     format->nChannels,
                     format->nSamplesPerSec,
                     &theta
-            );
+                );
                 break;
         }
-
-        *render_queue_tail = buffer;
-        render_queue_tail = &buffer->next;
     }
 
     IAudioRenderClient* render = nullptr;
-    EXIT_ON_ERROR(client->GetService(__uuidof(IAudioRenderClient), (void* *)&render));
+    EXIT_ON_ERROR(client->GetService(__uuidof(IAudioRenderClient), (void**)&render));
 
     // One buffer's worth of silence to avoid glitches at the start
     {
@@ -219,36 +195,33 @@ int main()
     }
 
     bool still_playing = true;
+    size_t written_buffers = 0;
+    unsigned char* data;
+    unsigned int padding;
+    unsigned int frames_available;
 
     EXIT_ON_ERROR(client->Start());
 
     while (still_playing) {
         Sleep(latency / 2);
 
-        if (render_queue == nullptr) {
+        if (written_buffers == buffer_count) {
             still_playing = false;
         }
         else {
-            unsigned char* data;
-            unsigned int padding;
-            unsigned int frames_available;
-
             EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
 
             frames_available = buffer_size - padding;
 
-            while (render_queue != nullptr && (render_queue->length <= frames_available * format->nBlockAlign)) {
-                RenderBuffer* buffer = render_queue;
-                render_queue = buffer->next;
-
-                unsigned int frames_to_write = buffer->length / format->nBlockAlign;
+            while (written_buffers < buffer_count && (buffer_size_bytes <= frames_available * format->nBlockAlign)) {
+                unsigned int frames_to_write = buffer_size_bytes / format->nBlockAlign;
 
                 EXIT_ON_ERROR(render->GetBuffer(frames_to_write, &data));
 
-                CopyMemory(data, buffer->buffer, frames_to_write * format->nBlockAlign);
+                memcpy(data, render_buffer + written_buffers * buffer_size_bytes, frames_to_write * format->nBlockAlign);
                 EXIT_ON_ERROR(render->ReleaseBuffer(frames_to_write, 0));
 
-                delete buffer;
+                written_buffers += 1;
 
                 EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
                 frames_available = buffer_size - padding;
@@ -256,9 +229,17 @@ int main()
         }
     }
 
-    EXIT_ON_ERROR(client->Stop());
-    CoUninitialize();
+    // One buffer's worth of silence to avoid glitches at the end
+    {
+        unsigned char* data;
+        EXIT_ON_ERROR(render->GetBuffer(buffer_size, &data));
+        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
+    }
 
+    EXIT_ON_ERROR(client->Stop());
+    CoUninitialize(); 
+
+    delete[] render_buffer;
     CoTaskMemFree(format);
     SAFE_RELEASE(enumerator);
     SAFE_RELEASE(device);
