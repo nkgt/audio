@@ -1,0 +1,10 @@
+# Visual Studio useless files
+.vs/
+audio/
+x64/
+*.vcxproj.filters
+*.vcxproj.user
+
+# Thirdparty debug files
+*d.lib
+*.pdb
