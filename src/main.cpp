@@ -56,22 +56,27 @@ constexpr int frequency = 440;
 constexpr int latency = 50;
 constexpr int duration = 5;
 
+static double square(double theta) {
+    return (4 / M_PI) * (sin(theta) + sin(3 * theta) / 3 + sin(5 * theta) / 5);
+}
+
 template<typename T>
-static void generate_sin_samples(
+static void generate_samples(
     unsigned char* buffer,
     size_t length,
     unsigned long frequency,
     unsigned short channel_count,
     unsigned long samples_per_second,
-    double* initial_angle
+    double* initial_angle,
+    double (*generator)(double)
 ) {
-    double increment = (frequency * (M_PI * 2)) / (double)samples_per_second;
+    double increment = (frequency * M_PI * 2) / (double)samples_per_second;
     T* data = reinterpret_cast<T*>(buffer);
     double theta = initial_angle != nullptr ? *initial_angle : 0;
 
     for (size_t i = 0; i < length / sizeof(T); i += channel_count) {
-        double value = sin(theta);
-        
+        double value = generator(theta);
+
         for (size_t j = 0; j < channel_count; ++j) {
             if constexpr (std::is_same_v<T, float>) {
                 data[i + j] = (float)value;
@@ -137,17 +142,27 @@ int main()
 
     EXIT_ON_ERROR(client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_NOPERSIST,
-        latency * 10000,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
+        0, // Get smallet possible buffer from the audio engine to minimize latency
         0,
         format,
         nullptr
     ));
 
+    HANDLE samples_ready_event = CreateEventEx(nullptr, nullptr, 0, SYNCHRONIZE | EVENT_MODIFY_STATE);
+    if (samples_ready_event == nullptr) {
+        EXIT_ON_ERROR(HRESULT_FROM_WIN32(GetLastError()));
+    }
+    EXIT_ON_ERROR(client->SetEventHandle(samples_ready_event));
+
     unsigned int buffer_size = 0;
     EXIT_ON_ERROR(client->GetBufferSize(&buffer_size));
 
-    unsigned int buffer_size_bytes = (buffer_size / 4) * format->nBlockAlign;
+    long long default_period;
+    EXIT_ON_ERROR(client->GetDevicePeriod(&default_period, nullptr));
+
+    unsigned int buffer_size_per_period = (default_period / 1e7) * format->nSamplesPerSec + 0.5;
+    unsigned int buffer_size_bytes = buffer_size_per_period * format->nBlockAlign;
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
     size_t buffer_count = data_length / buffer_size_bytes;
 
@@ -162,82 +177,85 @@ int main()
     for (size_t i = 0; i < buffer_count; ++i) {
         switch (sample_type) {
             case RenderSampleType::Float:
-                generate_sin_samples<float>(
+                generate_samples<float>(
                     render_buffer + i * buffer_size_bytes,
                     buffer_size_bytes,
                     frequency,
                     format->nChannels,
                     format->nSamplesPerSec,
-                    &theta
+                    &theta,
+                    sin
                 );
                 break;
             case RenderSampleType::PCM16bit:
-                generate_sin_samples<short>(
+                generate_samples<short>(
                     render_buffer + i * buffer_size_bytes,
                     buffer_size_bytes,
                     frequency,
                     format->nChannels,
                     format->nSamplesPerSec,
-                    &theta
+                    &theta,
+                    square
                 );
                 break;
         }
     }
+
+    EXIT_ON_ERROR(client->Start());
 
     IAudioRenderClient* render = nullptr;
     EXIT_ON_ERROR(client->GetService(__uuidof(IAudioRenderClient), (void**)&render));
 
     // One buffer's worth of silence to avoid glitches at the start
     {
+        WaitForSingleObject(samples_ready_event, INFINITE);
         unsigned char* data;
         EXIT_ON_ERROR(render->GetBuffer(buffer_size, &data));
         EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
     }
 
-    bool still_playing = true;
     size_t written_buffers = 0;
     unsigned char* data;
     unsigned int padding;
     unsigned int frames_available;
 
-    EXIT_ON_ERROR(client->Start());
 
-    while (still_playing) {
-        Sleep(latency / 2);
+    while (written_buffers < buffer_count) {
+        unsigned long wait_result = WaitForSingleObject(samples_ready_event, INFINITE);
 
-        if (written_buffers == buffer_count) {
-            still_playing = false;
-        }
-        else {
+        switch (wait_result) {
+        case WAIT_FAILED:
+            EXIT_ON_ERROR(HRESULT_FROM_WIN32(GetLastError()));
+            break;
+        case WAIT_OBJECT_0:
             EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
-
             frames_available = buffer_size - padding;
-
-            while (written_buffers < buffer_count && (buffer_size_bytes <= frames_available * format->nBlockAlign)) {
+            if (buffer_size_bytes <= frames_available * format->nBlockAlign) {
                 unsigned int frames_to_write = buffer_size_bytes / format->nBlockAlign;
 
                 EXIT_ON_ERROR(render->GetBuffer(frames_to_write, &data));
-
-                memcpy(data, render_buffer + written_buffers * buffer_size_bytes, frames_to_write * format->nBlockAlign);
+                memcpy(data, render_buffer + written_buffers * buffer_size_bytes, buffer_size_bytes);
                 EXIT_ON_ERROR(render->ReleaseBuffer(frames_to_write, 0));
 
                 written_buffers += 1;
-
-                EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
-                frames_available = buffer_size - padding;
             }
+        break;
         }
     }
 
     // One buffer's worth of silence to avoid glitches at the end
-    {
-        unsigned char* data;
-        EXIT_ON_ERROR(render->GetBuffer(buffer_size, &data));
-        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
-    }
+    //{
+    //    WaitForSingleObject(samples_ready_event, INFINITE);
+    //    unsigned char* data;
+    //    EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
+    //    EXIT_ON_ERROR(render->GetBuffer(buffer_size - padding, &data));
+    //    EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
+    //}
 
     EXIT_ON_ERROR(client->Stop());
-    CoUninitialize(); 
+    CoUninitialize();
+
+    CloseHandle(samples_ready_event);
 
     delete[] render_buffer;
     CoTaskMemFree(format);
