@@ -166,41 +166,6 @@ int main()
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
     size_t buffer_count = data_length / buffer_size_bytes;
 
-    unsigned char* render_buffer = new (std::nothrow) unsigned char[buffer_count * buffer_size_bytes];
-    if (render_buffer == nullptr) {
-        PLOG_ERROR << "Unable to allocate render buffer";
-        exit(EXIT_FAILURE);
-    }
-
-    double theta = 0;
-
-    for (size_t i = 0; i < buffer_count; ++i) {
-        switch (sample_type) {
-            case RenderSampleType::Float:
-                generate_samples<float>(
-                    render_buffer + i * buffer_size_bytes,
-                    buffer_size_bytes,
-                    frequency,
-                    format->nChannels,
-                    format->nSamplesPerSec,
-                    &theta,
-                    sin
-                );
-                break;
-            case RenderSampleType::PCM16bit:
-                generate_samples<short>(
-                    render_buffer + i * buffer_size_bytes,
-                    buffer_size_bytes,
-                    frequency,
-                    format->nChannels,
-                    format->nSamplesPerSec,
-                    &theta,
-                    square
-                );
-                break;
-        }
-    }
-
     EXIT_ON_ERROR(client->Start());
 
     IAudioRenderClient* render = nullptr;
@@ -218,7 +183,7 @@ int main()
     unsigned char* data;
     unsigned int padding;
     unsigned int frames_available;
-
+    double theta = 0;
 
     while (written_buffers < buffer_count) {
         unsigned long wait_result = WaitForSingleObject(samples_ready_event, INFINITE);
@@ -234,7 +199,30 @@ int main()
                 unsigned int frames_to_write = buffer_size_bytes / format->nBlockAlign;
 
                 EXIT_ON_ERROR(render->GetBuffer(frames_to_write, &data));
-                memcpy(data, render_buffer + written_buffers * buffer_size_bytes, buffer_size_bytes);
+                switch (sample_type) {
+                    case RenderSampleType::Float:
+                        generate_samples<float>(
+                            data,
+                            buffer_size_bytes,
+                            frequency,
+                            format->nChannels,
+                            format->nSamplesPerSec,
+                            &theta,
+                            square
+                        );
+                        break;
+                    case RenderSampleType::PCM16bit:
+                        generate_samples<short>(
+                            data,
+                            buffer_size_bytes,
+                            frequency,
+                            format->nChannels,
+                            format->nSamplesPerSec,
+                            &theta,
+                            square
+                        );
+                        break;
+                }
                 EXIT_ON_ERROR(render->ReleaseBuffer(frames_to_write, 0));
 
                 written_buffers += 1;
@@ -257,7 +245,6 @@ int main()
 
     CloseHandle(samples_ready_event);
 
-    delete[] render_buffer;
     CoTaskMemFree(format);
     SAFE_RELEASE(enumerator);
     SAFE_RELEASE(device);
