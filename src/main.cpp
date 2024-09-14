@@ -76,10 +76,10 @@ template<typename T>
 static void generate_samples(
     unsigned char* buffer,
     size_t length,
-    unsigned long frequency,
+    uint16_t frequency,
     double volume,
-    unsigned short channel_count,
-    unsigned long samples_per_second,
+    uint16_t channel_count,
+    uint32_t samples_per_second,
     double* initial_time,
     double (*generator)(double, double)
 ) {
@@ -109,8 +109,8 @@ static void generate_samples(
 
 int main()
 {
-    constexpr int frequency = 220;
-    constexpr int duration = 5;
+    const uint16_t frequency = 220;
+    const uint8_t duration = 5;
     const double volume = 0.3;
 
     static plog::ColorConsoleAppender<plog::TxtFormatter> console_appender;
@@ -124,7 +124,7 @@ int main()
         0,
         CLSCTX_ALL,
         __uuidof(IMMDeviceEnumerator),
-        (void* *)&enumerator)
+        (void**)&enumerator)
     );
 
     IMMDevice* device = nullptr;
@@ -172,21 +172,21 @@ int main()
     }
     EXIT_ON_ERROR(client->SetEventHandle(samples_ready_event));
 
-    unsigned int buffer_size = 0;
+    uint32_t buffer_size = 0;
     EXIT_ON_ERROR(client->GetBufferSize(&buffer_size));
 
-    long long default_period;
+    int64_t default_period;
     EXIT_ON_ERROR(client->GetDevicePeriod(&default_period, nullptr));
 
-    unsigned int buffer_size_per_period = (default_period / 1e7) * format->nSamplesPerSec + 0.5;
-    unsigned int buffer_size_bytes = buffer_size_per_period * format->nBlockAlign;
+    uint32_t buffer_size_per_period = static_cast<uint32_t>((default_period / 1e7) * format->nSamplesPerSec + 0.5);
+    uint32_t buffer_size_bytes = buffer_size_per_period * format->nBlockAlign;
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
     size_t buffer_count = data_length / buffer_size_bytes;
 
     size_t written_buffers = 0;
     unsigned char* data;
-    unsigned int padding;
-    unsigned int frames_available;
+    uint32_t padding;
+    uint32_t frames_available;
     double time = 0;
 
     EXIT_ON_ERROR(client->Start());
@@ -214,7 +214,7 @@ int main()
             EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
             frames_available = buffer_size - padding;
             if (buffer_size_bytes <= frames_available * format->nBlockAlign) {
-                unsigned int frames_to_write = buffer_size_bytes / format->nBlockAlign;
+                uint32_t frames_to_write = buffer_size_bytes / format->nBlockAlign;
 
                 EXIT_ON_ERROR(render->GetBuffer(frames_to_write, &data));
                 switch (sample_type) {
