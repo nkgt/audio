@@ -52,12 +52,24 @@ static unsigned long locale_id = []() {
     return wcstoul(locale, nullptr, 16);
 }();
 
-constexpr int frequency = 440;
-constexpr int latency = 50;
-constexpr int duration = 5;
+double sign(double val) {
+    return (0.0 < val) - (val < 0.0);
+}
 
-static double square(double theta) {
-    return (4 / M_PI) * (sin(theta) + sin(3 * theta) / 3 + sin(5 * theta) / 5);
+static double sine(double frequency, double time) {
+    return sin(2 * M_PI * frequency * time);
+}
+
+static double triangle(double frequency, double time) {
+    return 2 * abs(2 * (time * frequency - floor(time * frequency + 0.5))) - 1;
+}
+
+static double square(double frequency, double time) {
+    return sign(sin(2 * M_PI * frequency * time));
+}
+
+static double sawtooth(double frequency, double time) {
+    return 2 * (time * frequency - floor(time * frequency + 0.5));
 }
 
 template<typename T>
@@ -65,37 +77,42 @@ static void generate_samples(
     unsigned char* buffer,
     size_t length,
     unsigned long frequency,
+    double volume,
     unsigned short channel_count,
     unsigned long samples_per_second,
-    double* initial_angle,
-    double (*generator)(double)
+    double* initial_time,
+    double (*generator)(double, double)
 ) {
-    double increment = (frequency * M_PI * 2) / (double)samples_per_second;
+    double increment = 1.0 / samples_per_second;
     T* data = reinterpret_cast<T*>(buffer);
-    double theta = initial_angle != nullptr ? *initial_angle : 0;
+    double time = initial_time != nullptr ? *initial_time : 0;
 
     for (size_t i = 0; i < length / sizeof(T); i += channel_count) {
-        double value = generator(theta);
+        double value = generator(frequency, time);
 
         for (size_t j = 0; j < channel_count; ++j) {
             if constexpr (std::is_same_v<T, float>) {
-                data[i + j] = (float)value;
+                data[i + j] = (float)(volume * value);
             }
             else if constexpr (std::is_same_v<T, short>) {
-                data[i + j] = (short)(value * _I16_MAX);
+                data[i + j] = (short)(volume * value * _I16_MAX);
             }
         }
 
-        theta += increment;
+        time += increment;
     }
 
-    if (initial_angle != nullptr) {
-        *initial_angle = theta;
+    if (initial_time != nullptr) {
+        *initial_time = time;
     }
 }
 
 int main()
 {
+    constexpr int frequency = 220;
+    constexpr int duration = 5;
+    const double volume = 0.3;
+
     static plog::ColorConsoleAppender<plog::TxtFormatter> console_appender;
     plog::init(plog::verbose, &console_appender);
 
@@ -186,12 +203,6 @@ int main()
         EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size - padding, AUDCLNT_BUFFERFLAGS_SILENT));
     }
 
-    size_t written_buffers = 0;
-    unsigned char* data;
-    unsigned int padding;
-    unsigned int frames_available;
-    double theta = 0;
-
     while (written_buffers < buffer_count) {
         unsigned long wait_result = WaitForSingleObject(samples_ready_event, INFINITE);
 
@@ -212,10 +223,11 @@ int main()
                             data,
                             buffer_size_bytes,
                             frequency,
+                            volume,
                             format->nChannels,
                             format->nSamplesPerSec,
-                            &theta,
-                            square
+                            &time,
+                            sawtooth
                         );
                         break;
                     case RenderSampleType::PCM16bit:
@@ -223,9 +235,10 @@ int main()
                             data,
                             buffer_size_bytes,
                             frequency,
+                            volume,
                             format->nChannels,
                             format->nSamplesPerSec,
-                            &theta,
+                            &time,
                             square
                         );
                         break;
