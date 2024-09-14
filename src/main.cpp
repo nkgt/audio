@@ -17,8 +17,8 @@
         (x) = nullptr;    \
     }
 
-#define EXIT_ON_ERROR(result)                                           \
-    if (FAILED((result))) {                                             \
+#define EXIT_ON_ERROR(x)                                                \
+    if (HRESULT result = (x); FAILED(result)) {                         \
         wchar_t buf[256]{};                                             \
                                                                         \
         FormatMessageW(                                                 \
@@ -166,6 +166,12 @@ int main()
     size_t data_length = (format->nSamplesPerSec * duration * format->nBlockAlign) + (buffer_size_bytes - 1);
     size_t buffer_count = data_length / buffer_size_bytes;
 
+    size_t written_buffers = 0;
+    unsigned char* data;
+    unsigned int padding;
+    unsigned int frames_available;
+    double time = 0;
+
     EXIT_ON_ERROR(client->Start());
 
     IAudioRenderClient* render = nullptr;
@@ -174,9 +180,10 @@ int main()
     // One buffer's worth of silence to avoid glitches at the start
     {
         WaitForSingleObject(samples_ready_event, INFINITE);
-        unsigned char* data;
-        EXIT_ON_ERROR(render->GetBuffer(buffer_size, &data));
-        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
+        unsigned char* tmp;
+        EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
+        EXIT_ON_ERROR(render->GetBuffer(buffer_size - padding, &tmp));
+        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size - padding, AUDCLNT_BUFFERFLAGS_SILENT));
     }
 
     size_t written_buffers = 0;
@@ -232,13 +239,13 @@ int main()
     }
 
     // One buffer's worth of silence to avoid glitches at the end
-    //{
-    //    WaitForSingleObject(samples_ready_event, INFINITE);
-    //    unsigned char* data;
-    //    EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
-    //    EXIT_ON_ERROR(render->GetBuffer(buffer_size - padding, &data));
-    //    EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size, AUDCLNT_BUFFERFLAGS_SILENT));
-    //}
+    {
+        WaitForSingleObject(samples_ready_event, INFINITE);
+        unsigned char* tmp;
+        EXIT_ON_ERROR(client->GetCurrentPadding(&padding));
+        EXIT_ON_ERROR(render->GetBuffer(buffer_size - padding, &tmp));
+        EXIT_ON_ERROR(render->ReleaseBuffer(buffer_size - padding, AUDCLNT_BUFFERFLAGS_SILENT));
+    }
 
     EXIT_ON_ERROR(client->Stop());
     CoUninitialize();
